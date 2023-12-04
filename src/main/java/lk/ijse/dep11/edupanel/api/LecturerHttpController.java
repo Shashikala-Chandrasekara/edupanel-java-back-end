@@ -8,6 +8,7 @@ import lk.ijse.dep11.edupanel.to.response.LecturerRespTO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import javax.sql.DataSource;
 import javax.validation.Valid;
@@ -35,7 +36,7 @@ public class LecturerHttpController {
 
             connection.setAutoCommit(false);
             try{
-                PreparedStatement stmInsert = connection.prepareStatement("INSERT INTO lecturer (name, designation, qualifications, linkedin) VALUES (?,?,?,?)");
+                PreparedStatement stmInsert = connection.prepareStatement("INSERT INTO lecturer (name, designation, qualifications, linkedin) VALUES (?,?,?,?)", Statement.RETURN_GENERATED_KEYS);
                 stmInsert.setString(1, lecturer.getName());
                 stmInsert.setString(2, lecturer.getDesignation());
                 stmInsert.setString(3, lecturer.getQualifications());
@@ -54,11 +55,10 @@ public class LecturerHttpController {
                     stmUpdateLecturer.executeUpdate();
                 }
 
-                final String table = lecturer.getType().equalsIgnoreCase("full-time") ? "full-time-rank" : "part-time-rank";
-
-
+                final String table = lecturer.getType().equalsIgnoreCase("full-time")
+                        ? "full_time_rank": "part_time_rank";
                 Statement stm = connection.createStatement();
-                ResultSet rst = stm.executeQuery("SELECT `rank` FROM "+ table + " ORDER BY `rank` DESC LIMIT 1");
+                ResultSet rst = stm.executeQuery("SELECT `rank` FROM "+ table +" ORDER BY `rank` DESC LIMIT 1");
 
                 int rank;
                 if (!rst.next()) rank =1;
@@ -72,7 +72,7 @@ public class LecturerHttpController {
                 stmInsertRank.executeUpdate();
 
                 String pictureUrl = null;
-                if (lecturer.getPicture() != null && lecturer.getPicture().isEmpty()){
+                if (lecturer.getPicture() != null && !lecturer.getPicture().isEmpty()){
                     Blob blob = bucket.create(picture, lecturer.getPicture().getInputStream(), lecturer.getPicture().getContentType());
                     pictureUrl = blob.signUrl(1, TimeUnit.DAYS, Storage.SignUrlOption.withV4Signature()).toString();
                 }
@@ -104,9 +104,56 @@ public class LecturerHttpController {
         System.out.println("updateLecturer()");
     }
 
+    @ResponseStatus(HttpStatus.NO_CONTENT)
     @DeleteMapping("/{lecturer-id}")
-    public void deleteLecturer(){
-        System.out.println("deleteLecturer()");
+    public void deleteLecturer(@PathVariable("lecturer-id") int lecturerId){
+        try (Connection connection = pool.getConnection()) {
+            PreparedStatement stmExists = connection.prepareStatement("SELECT * FROM lecturer WHERE id = ?");
+            stmExists.setInt(1, lecturerId);
+            if (!stmExists.executeQuery().next()) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+
+            connection.setAutoCommit(false);
+            try{
+                PreparedStatement stmIdentify = connection.prepareStatement("SELECT l.id, l.name, l.picture, ftr.`rank` ftr, ptr.`rank` ptr FROM lecturer l\n" +
+                        "        LEFT OUTER JOIN full_time_rank ftr on l.id = ftr.lecturer_id\n" +
+                        "        LEFT OUTER JOIN part_time_rank ptr on l.id = ptr.lecturer_id\n" +
+                        "        WHERE l.id = ?");
+                stmIdentify.setInt(1, lecturerId);
+                ResultSet rst = stmIdentify.executeQuery();
+                rst.next();
+                int ftr = rst.getInt("ftr");
+                int ptr = rst.getInt("ptr");
+                String picture = rst.getString("picture");
+                String tableName = ftr > 0 ? "full_time_rank" : "part_time_rank";
+                int rank = ftr > 0 ? ftr : ptr;
+
+                Statement stmDeleteRank = connection.createStatement();
+                stmDeleteRank.executeUpdate("DELETE FROM " + tableName + " WHERE `rank` = " + rank);
+
+                Statement stmShift = connection.createStatement();
+                stmShift.executeUpdate("UPDATE " + tableName + " SET `rank` = `rank` -1 WHERE `rank` > " + rank);
+                PreparedStatement stmDeleteLecturer = connection.prepareStatement("DELETE FROM lecturer WHERE id = ?");
+                stmDeleteLecturer.setInt(1, lecturerId);
+                stmDeleteLecturer.executeUpdate();
+
+
+                if (picture != null) {
+                    bucket.get(picture).delete();
+                }
+
+                connection.commit();
+            } catch (Throwable t) {
+                connection.rollback();
+                throw t;
+            }finally {
+                connection.setAutoCommit(true);
+            }
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+
+
     }
 
     @GetMapping
