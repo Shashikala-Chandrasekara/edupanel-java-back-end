@@ -1,13 +1,20 @@
 package lk.ijse.dep11.edupanel.api;
 
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.Bucket;
+import com.google.cloud.storage.Storage;
 import lk.ijse.dep11.edupanel.to.request.LecturerRequestTO;
+import lk.ijse.dep11.edupanel.to.response.LecturerRespTO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
 import javax.sql.DataSource;
 import javax.validation.Valid;
+import java.io.IOException;
+import java.net.URL;
 import java.sql.*;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/api/v1/lecturers")
@@ -17,9 +24,13 @@ public class LecturerHttpController {
     @Autowired
     private DataSource pool;
 
+    @Autowired
+    private Bucket bucket;
+
+
     @ResponseStatus(HttpStatus.CREATED)
     @PostMapping(consumes = "multipart/form-data", produces = "application/json")
-    public void createNewLecturer(@ModelAttribute @Valid LecturerRequestTO lecturer){
+    public LecturerRespTO createNewLecturer(@ModelAttribute @Valid LecturerRequestTO lecturer){
         try (Connection connection = pool.getConnection()) {
 
             connection.setAutoCommit(false);
@@ -36,7 +47,7 @@ public class LecturerHttpController {
 
                 String picture = lecturerId + "-" + lecturer.getName();         // path of picture inside the bucket
 
-                if (lecturer.getPicture() != null || !lecturer.getPicture().isEmpty()){
+                if (lecturer.getPicture() != null && !lecturer.getPicture().isEmpty()){
                     PreparedStatement stmUpdateLecturer = connection.prepareStatement("UPDATE lecturer SET picture = ? WHERE id = ?");
                     stmUpdateLecturer.setString(1, picture);
                     stmUpdateLecturer.setInt(2, lecturerId);
@@ -60,7 +71,21 @@ public class LecturerHttpController {
                 stmInsertRank.setInt(2, rank);
                 stmInsertRank.executeUpdate();
 
+                String pictureUrl = null;
+                if (lecturer.getPicture() != null && lecturer.getPicture().isEmpty()){
+                    Blob blob = bucket.create(picture, lecturer.getPicture().getInputStream(), lecturer.getPicture().getContentType());
+                    pictureUrl = blob.signUrl(1, TimeUnit.DAYS, Storage.SignUrlOption.withV4Signature()).toString();
+                }
+
                 connection.commit();
+
+                return new LecturerRespTO(lecturerId,
+                        lecturer.getName(),
+                        lecturer.getDesignation(),
+                        lecturer.getQualifications(),
+                        lecturer.getType(),
+                        pictureUrl,
+                        lecturer.getLinkedin());
             } catch (Throwable t) {
                 connection.rollback();
                 throw t;
@@ -69,7 +94,7 @@ public class LecturerHttpController {
             }
 
 
-        } catch (SQLException e) {
+        } catch (SQLException | IOException e) {
             throw new RuntimeException(e);
         }
     }
